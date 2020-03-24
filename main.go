@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/digitaljanitors/go-httpstat"
@@ -33,10 +32,9 @@ func newRequest(method, url string, stats *httpstat.Result) (*http.Request, erro
 }
 
 type SegmentDownload struct {
-	URI           string
-	Limit         int64
-	Offset        int64
-	totalDuration time.Duration
+	URI    string
+	Limit  int64
+	Offset int64
 }
 
 func (sd SegmentDownload) SegmentStart() int64 {
@@ -50,7 +48,27 @@ func (sd SegmentDownload) SegmentEnd() int64 {
 	return sd.Offset + sd.Limit - 1
 }
 
-func downloadSegments(dlc chan *SegmentDownload, recTime time.Duration) {
+func NewSegmentDownload(uri string, limit, offset int64) *SegmentDownload {
+	return &SegmentDownload{
+		URI:    uri,
+		Limit:  limit,
+		Offset: offset,
+	}
+}
+
+func translateURI(playlistURL *url.URL, segmentURI string) (string, error) {
+	msUrl, err := playlistURL.Parse(segmentURI)
+	if err != nil {
+		return "", err
+	}
+	msURI, err := url.QueryUnescape(msUrl.String())
+	if err != nil {
+		return "", err
+	}
+	return msURI, nil
+}
+
+func downloadSegments(dlc chan *SegmentDownload) {
 	tmpfile, err := ioutil.TempFile("", "echo360-benchmark")
 	if err != nil {
 		log.Fatal(err)
@@ -88,9 +106,7 @@ func downloadSegments(dlc chan *SegmentDownload, recTime time.Duration) {
 
 }
 
-func getPlaylist(urlStr string, recTime time.Duration, dlc chan *SegmentDownload) {
-	startTime := time.Now()
-	var recDuration time.Duration
+func getPlaylist(urlStr string, dlc chan *SegmentDownload) {
 	playlistUrl, err := url.Parse(urlStr)
 	if err != nil {
 		log.Fatal(err)
@@ -113,31 +129,21 @@ func getPlaylist(urlStr string, recTime time.Duration, dlc chan *SegmentDownload
 		resp.Body.Close()
 		if listType == m3u8.MEDIA {
 			mpl := playlist.(*m3u8.MediaPlaylist)
+			if mpl.Map != nil {
+				uri, err := translateURI(playlistUrl, mpl.Map.URI)
+				if err != nil {
+					log.Fatal(err)
+				}
+				dlc <- NewSegmentDownload(uri, mpl.Map.Limit, mpl.Map.Offset)
+			}
 			for _, v := range mpl.Segments {
 				if v != nil {
-					var msURI string
-					if strings.HasPrefix(v.URI, "http") {
-						msURI, err = url.QueryUnescape(v.URI)
-						if err != nil {
-							log.Fatal(err)
-						}
-					} else {
-						msUrl, err := playlistUrl.Parse(v.URI)
-						if err != nil {
-							log.Print(err)
-							continue
-						}
-						msURI, err = url.QueryUnescape(msUrl.String())
-						if err != nil {
-							log.Fatal(err)
-						}
+					uri, err := translateURI(playlistUrl, v.URI)
+					if err != nil {
+						log.Print(err)
+						continue
 					}
-					recDuration = time.Now().Sub(startTime)
-					dlc <- &SegmentDownload{msURI, v.Limit, v.Offset, recDuration}
-					if recTime != 0 && recDuration != 0 && recDuration >= recTime {
-						close(dlc)
-						return
-					}
+					dlc <- NewSegmentDownload(uri, v.Limit, v.Offset)
 				}
 			}
 			if mpl.Closed {
@@ -157,12 +163,7 @@ func getPlaylist(urlStr string, recTime time.Duration, dlc chan *SegmentDownload
 func main() {
 	playlist := "https://benchmark.echo360.org.au/1/s1q1.m3u8"
 
-	duration, err := time.ParseDuration("2m50s")
-	if err != nil {
-		log.Fatal(err)
-	}
-
 	dlChan := make(chan *SegmentDownload, 1024)
-	go getPlaylist(playlist, duration, dlChan)
-	downloadSegments(dlChan, duration)
+	go getPlaylist(playlist, dlChan)
+	downloadSegments(dlChan)
 }
