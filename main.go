@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"io/ioutil"
 	"net/http"
@@ -11,12 +12,13 @@ import (
 
 	"github.com/digitaljanitors/go-httpstat"
 	"github.com/grafov/m3u8"
+	"github.com/sirupsen/logrus"
 	log "github.com/sirupsen/logrus"
 )
 
 const VERSION = "0.1.0"
 
-var USER_AGENT string
+var USER_AGENT = fmt.Sprintf("HLS-Benchmark-tool/%s", VERSION)
 
 var client = &http.Client{}
 
@@ -32,9 +34,10 @@ func newRequest(method, url string, stats *httpstat.Result) (*http.Request, erro
 }
 
 type SegmentDownload struct {
-	URI    string
-	Limit  int64
-	Offset int64
+	URI      string
+	Duration float64
+	Limit    int64
+	Offset   int64
 }
 
 func (sd SegmentDownload) SegmentStart() int64 {
@@ -48,12 +51,121 @@ func (sd SegmentDownload) SegmentEnd() int64 {
 	return sd.Offset + sd.Limit - 1
 }
 
-func NewSegmentDownload(uri string, limit, offset int64) *SegmentDownload {
+func NewSegmentDownload(uri string, duration float64, limit, offset int64) *SegmentDownload {
 	return &SegmentDownload{
-		URI:    uri,
-		Limit:  limit,
-		Offset: offset,
+		URI:      uri,
+		Duration: duration,
+		Limit:    limit,
+		Offset:   offset,
 	}
+}
+
+type ResultSummary struct {
+	// The following are duration for each phase
+	DNSLookup        []time.Duration
+	TCPConnection    []time.Duration
+	TLSHandshake     []time.Duration
+	ServerProcessing []time.Duration
+	ContentTransfer  []time.Duration
+
+	// The followings are timeline of request
+	NameLookup    []time.Duration
+	Connect       []time.Duration
+	Pretransfer   []time.Duration
+	StartTransfer []time.Duration
+	Total         []time.Duration
+}
+
+func (rs *ResultSummary) Add(result *httpstat.Result) {
+	rs.DNSLookup = append(rs.DNSLookup, result.DNSLookup)
+	rs.TCPConnection = append(rs.TCPConnection, result.TCPConnection)
+	rs.TLSHandshake = append(rs.TLSHandshake, result.TLSHandshake)
+	rs.ServerProcessing = append(rs.ServerProcessing, result.ServerProcessing)
+	rs.ContentTransfer = append(rs.ContentTransfer, result.ContentTransfer)
+	rs.NameLookup = append(rs.NameLookup, result.NameLookup)
+	rs.Connect = append(rs.Connect, result.Connect)
+	rs.Pretransfer = append(rs.Pretransfer, result.Pretransfer)
+	rs.StartTransfer = append(rs.StartTransfer, result.StartTransfer)
+	rs.Total = append(rs.Total, result.Total)
+}
+
+func (rs *ResultSummary) Averages() map[string]interface{} {
+	var f = func(d []time.Duration) time.Duration {
+		var total time.Duration
+		for _, value := range d {
+			total += value
+		}
+		return time.Duration(int64(total) / int64(len(d)))
+	}
+	return map[string]interface{}{
+		"DNSLookup":        f(rs.DNSLookup),
+		"TCPConnection":    f(rs.TCPConnection),
+		"TLSHandshake":     f(rs.TLSHandshake),
+		"ServerProcessing": f(rs.ServerProcessing),
+		"ContentTransfer":  f(rs.ContentTransfer),
+
+		"NameLookup":    f(rs.NameLookup),
+		"Connect":       f(rs.Connect),
+		"Pretransfer":   f(rs.Connect),
+		"StartTransfer": f(rs.StartTransfer),
+		"Total":         f(rs.Total),
+	}
+}
+
+func (rs *ResultSummary) Maximums() map[string]interface{} {
+	var f = func(d []time.Duration) time.Duration {
+		var max time.Duration
+		for _, value := range d {
+			if value > max {
+				max = value
+			}
+		}
+		return max
+	}
+	return map[string]interface{}{
+		"DNSLookup":        f(rs.DNSLookup),
+		"TCPConnection":    f(rs.TCPConnection),
+		"TLSHandshake":     f(rs.TLSHandshake),
+		"ServerProcessing": f(rs.ServerProcessing),
+		"ContentTransfer":  f(rs.ContentTransfer),
+
+		"NameLookup":    f(rs.NameLookup),
+		"Connect":       f(rs.Connect),
+		"Pretransfer":   f(rs.Connect),
+		"StartTransfer": f(rs.StartTransfer),
+		"Total":         f(rs.Total),
+	}
+}
+
+func (rs *ResultSummary) Minimums() map[string]interface{} {
+	var f = func(d []time.Duration) time.Duration {
+		var min time.Duration
+		for _, value := range d {
+			if value < min {
+				min = value
+			}
+		}
+		return min
+	}
+	return map[string]interface{}{
+		"DNSLookup":        f(rs.DNSLookup),
+		"TCPConnection":    f(rs.TCPConnection),
+		"TLSHandshake":     f(rs.TLSHandshake),
+		"ServerProcessing": f(rs.ServerProcessing),
+		"ContentTransfer":  f(rs.ContentTransfer),
+
+		"NameLookup":    f(rs.NameLookup),
+		"Connect":       f(rs.Connect),
+		"Pretransfer":   f(rs.Connect),
+		"StartTransfer": f(rs.StartTransfer),
+		"Total":         f(rs.Total),
+	}
+}
+
+func (rs *ResultSummary) LogSummary() {
+	log.WithFields(rs.Minimums()).Info("Results Minimums")
+	log.WithFields(rs.Maximums()).Info("Results Maximums")
+	log.WithFields(rs.Averages()).Info("Results Averages")
 }
 
 func translateURI(playlistURL *url.URL, segmentURI string) (string, error) {
@@ -68,15 +180,29 @@ func translateURI(playlistURL *url.URL, segmentURI string) (string, error) {
 	return msURI, nil
 }
 
-func downloadSegments(dlc chan *SegmentDownload) {
-	tmpfile, err := ioutil.TempFile("", "echo360-benchmark")
-	if err != nil {
-		log.Fatal(err)
+func calculateTransfer(bytesDownloaded int64, overTime time.Duration) string {
+	// (bytes downloaded / over time) = Bytes/second
+	// Bytes/second x 0.000008 = Mb/s
+	// rate := float64(bytesDownloaded) / overTime.Seconds()
+	rate := float64(bytesDownloaded) / overTime.Seconds() * 0.000008
+	return fmt.Sprintf("%.2f Mb/s", rate)
+}
+
+func logSegmentDownload(resp *http.Response, stats *httpstat.Result, segment *SegmentDownload) {
+	lvl := logrus.InfoLevel
+	sd := time.Duration(int64(segment.Duration) * int64(time.Second))
+	if stats.Total >= sd {
+		lvl = logrus.WarnLevel
 	}
-	defer func() {
-		tmpfile.Close()
-		os.Remove(tmpfile.Name()) // clean up after ourself
-	}()
+	log.WithFields(stats.Fields()).
+		WithField("X-Cache", resp.Header["X-Cache"][0]).
+		WithField("TransferRate", calculateTransfer(resp.ContentLength, stats.ContentTransfer)).
+		WithField("ConnectedTo", stats.ConnectedTo).
+		Logf(lvl, "Downloaded %d bytes of %v @%d-%d\n", resp.ContentLength, segment.URI, segment.SegmentStart(), segment.SegmentEnd())
+}
+
+func downloadSegments(dlc chan *SegmentDownload) ResultSummary {
+	results := ResultSummary{}
 
 	for v := range dlc {
 		stats := &httpstat.Result{}
@@ -100,10 +226,11 @@ func downloadSegments(dlc chan *SegmentDownload) {
 		}
 		resp.Body.Close()
 		stats.End(time.Now())
-		log.WithFields(stats.Fields()).Infof("Downloaded %d bytes of %v @%d-%d\n", resp.ContentLength, v.URI, v.SegmentStart(), v.SegmentEnd())
-
+		logSegmentDownload(resp, stats, v)
+		results.Add(stats)
 	}
 
+	return results
 }
 
 func getPlaylist(urlStr string, dlc chan *SegmentDownload) {
@@ -127,6 +254,8 @@ func getPlaylist(urlStr string, dlc chan *SegmentDownload) {
 			log.Fatal(err)
 		}
 		resp.Body.Close()
+		stats.End(time.Now())
+		logSegmentDownload(resp, stats, &SegmentDownload{urlStr, 1, 0, 1})
 		if listType == m3u8.MEDIA {
 			mpl := playlist.(*m3u8.MediaPlaylist)
 			if mpl.Map != nil {
@@ -134,7 +263,7 @@ func getPlaylist(urlStr string, dlc chan *SegmentDownload) {
 				if err != nil {
 					log.Fatal(err)
 				}
-				dlc <- NewSegmentDownload(uri, mpl.Map.Limit, mpl.Map.Offset)
+				dlc <- NewSegmentDownload(uri, mpl.TargetDuration, mpl.Map.Limit, mpl.Map.Offset)
 			}
 			for _, v := range mpl.Segments {
 				if v != nil {
@@ -143,7 +272,7 @@ func getPlaylist(urlStr string, dlc chan *SegmentDownload) {
 						log.Print(err)
 						continue
 					}
-					dlc <- NewSegmentDownload(uri, v.Limit, v.Offset)
+					dlc <- NewSegmentDownload(uri, v.Duration, v.Limit, v.Offset)
 				}
 			}
 			if mpl.Closed {
@@ -161,9 +290,16 @@ func getPlaylist(urlStr string, dlc chan *SegmentDownload) {
 }
 
 func main() {
-	playlist := "https://benchmark.echo360.org.au/1/s1q1.m3u8"
+	flag.Parse()
+
+	if flag.NArg() < 1 {
+		os.Stderr.Write([]byte("Usage: hlsbenchmark media-playlist-url\n"))
+		flag.PrintDefaults()
+		os.Exit(2)
+	}
 
 	dlChan := make(chan *SegmentDownload, 1024)
-	go getPlaylist(playlist, dlChan)
-	downloadSegments(dlChan)
+	go getPlaylist(flag.Arg(0), dlChan)
+	results := downloadSegments(dlChan)
+	results.LogSummary()
 }
