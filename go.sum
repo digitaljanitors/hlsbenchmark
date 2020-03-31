@@ -2,6 +2,8 @@ github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/digitaljanitors/go-httpstat v0.2.1-0.20200326204611-7494f756c126 h1:yUYvNTEOKV3f5X9zgWV6OvaAvc7lv4yLRxWrjqSQv9g=
 github.com/digitaljanitors/go-httpstat v0.2.1-0.20200326204611-7494f756c126/go.mod h1:6ScKx9gKbd965AZfgFGR0fGaEhzDEfD1P4lg1XeAzPA=
+github.com/digitaljanitors/go-httpstat v0.2.1-0.20200331213148-166c91beed46 h1:3MtehoVbICRhL/tsQ4J1Nl9+Dc9maFmSVaT07H9Jc+s=
+github.com/digitaljanitors/go-httpstat v0.2.1-0.20200331213148-166c91beed46/go.mod h1:6ScKx9gKbd965AZfgFGR0fGaEhzDEfD1P4lg1XeAzPA=
 github.com/grafov/m3u8 v0.11.1 h1:igZ7EBIB2IAsPPazKwRKdbhxcoBKO3lO1UY57PZDeNA=
 github.com/grafov/m3u8 v0.11.1/go.mod h1:nqzOkfBiZJENr52zTVd/Dcl03yzphIMbJqkXGu+u080=
 github.com/konsorten/go-windows-terminal-sequences v1.0.1 h1:mweAR1A6xJ3oS2pRaGiHgQ4OO8tzTaLawm8vnODuwDk=
